@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Kimi K3 Expert Router Arena</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e17;color:#c8d0e0;font-family:'Courier New',monospace;overflow:hidden;touch-action:none}
+#app{position:relative;width:100vw;height:100vh}
+canvas{display:block;width:100%;height:100%}
+#toolbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);display:flex;gap:6px;z-index:10}
+#toolbar button{background:rgba(10,14,23,.85);border:1px solid #1e2a4a;color:#7a8ab5;padding:6px 14px;font-size:12px;font-family:inherit;cursor:pointer;border-radius:4px;transition:all .2s}
+#toolbar button.active{background:#0d1b3e;border-color:#3366ff;color:#66aaff;box-shadow:0 0 10px rgba(51,102,255,.3)}
+#toolbar button:hover{border-color:#3366ff;color:#66aaff}
+#hud{position:fixed;top:50px;right:12px;background:rgba(10,14,23,.9);border:1px solid #1e2a4a;border-radius:6px;padding:10px 14px;font-size:11px;z-index:10;min-width:180px}
+#hud .label{color:#4a5a8a;margin-right:8px}
+#hud .val{color:#66aaff;font-weight:bold}
+#log{position:fixed;bottom:12px;left:12px;right:12px;height:60px;background:rgba(10,14,23,.9);border:1px solid #1e2a4a;border-radius:6px;padding:6px 10px;font-size:10px;z-index:10;overflow-y:auto;font-family:monospace}
+#log .entry{margin-bottom:2px}
+#log .entry.warn{color:#ffaa44}
+#log .entry.info{color:#4a8aff}
+#log .entry.success{color:#44ff88}
+#title{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5;pointer-events:none;opacity:.15}
+#title h1{font-size:28px;color:#3366ff;letter-spacing:4px}
+#title p{font-size:11px;color:#4a5a8a;margin-top:8px}
+</style>
+</head>
+<body>
+<div id="app">
+<canvas id="c"></canvas>
+<div id="toolbar">
+<button class="active" data-mode="topology">Expert Topology</button>
+<button data-mode="routing">Routing Particles</button>
+<button data-mode="pipeline">Architecture Pipeline</button>
+<button data-mode="arena">Benchmark Arena</button>
+</div>
+<div id="hud"></div>
+<div id="log"></div>
+<div id="title"><h1>KIMI K3</h1><p>2.8T Params &#x2022; 8,960 Experts &#x2022; Delta Attention</p></div>
+</div>
+<script>
+!function(){
+"use strict";
+var W,H,cvs,ctx,dpr;
+var mode="topology";
+var modeNames=["topology","routing","pipeline","arena"];
+var seed=42;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+var rng=mulberry32(seed);
+function rr(a,b){return a+rng()*(b-a)}
+function ri(a,b){return Math.floor(rr(a,b+1))}
+function clamp(v,mn,mx){return Math.max(mn,Math.min(mx,v))}
+var groups=[
+{name:"Coding",color:"#ff6b6b",experts:[],sub:["Python","Rust","JavaScript","TypeScript","SQL","C++","Go","R"]},
+{name:"Math",color:"#4ecdc4",experts:[],sub:["Calculus","Linear Algebra","Number Theory","Statistics","Topology","Optimization","Graph Theory","Probability"]},
+{name:"Reasoning",color:"#45b7d1",experts:[],sub:["Deductive","Inductive","Abductive","Analogical","Causal","Temporal","Spatial","Counterfactual"]},
+{name:"Knowledge",color:"#f9ca24",experts:[],sub:["History","Science","Philosophy","Law","Medicine","Engineering","Literature","Geography"]}
+];
+var expertNodes=[];
+var particles=[];
+var pipelineParticles=[];
+var arenaData=[];
+var time=0;
+var mouseX=-1,mouseY=-1;
+var dragNode=null;
+var dragOffX=0,dragOffY=0;
+var logEntries=[];
+var activeExperts=[];
+var lruCache=[];
+var diskCache=[];
+var diskActive=0;
+var diskTotal=744000000000;
+function initArena(){
+for(var i=0;i<4;i++){
+var g=groups[i];
+for(var j=0;j<8;j++){
+var node={
+gx:i,gy:j,
+x:0,y:0,
+vx:0,vy:0,
+domain:i,
+sub:j,
+active:false,
+activation:0,
+name:g.sub[j],
+color:g.color
+};
+g.experts.push(node);
+expertNodes.push(node);
+}
+}
+for(var i=0;i<15;i++){
+var n=ri(0,expertNodes.length-1);
+var node=expertNodes[n];
+if(!lruCache.find(function(e){return e===node})){
+lruCache.push(node);
+if(lruCache.length>16){
+var evicted=lruCache.shift();
+evicted.active=false;
+diskCache.push(evicted);
+diskActive++;
+}
+node.active=true;
+activeExperts.push(node);
+}
+}
+}
+function addLog(msg,type){
+type=type||"info";
+var t=new Date();
+var ts=t.toTimeString().split(" ")[0];
+logEntries.unshift("["+ts+"] "+msg);
+if(logEntries.length>50)logEntries.pop();
+var el=document.getElementById("log");
+if(el){
+var d=document.createElement("div");
+d.className="entry "+type;
+d.textContent="[ "+ts+" ] "+msg;
+el.insertBefore(d,el.firstChild);
+while(el.children.length>50)el.removeChild(el.lastChild);
+}
+}
+function resize(){
+dpr=window.devicePixelRatio||1;
+var cw=window.innerWidth;
+var ch=window.innerHeight;
+W=cw*0.7;
+H=ch*0.7;
+cvs=document.getElementById("c");
+cvs.width=cw*dpr;
+cvs.height=ch*dpr;
+cvs.style.width=cw+"px";
+cvs.style.height=ch+"px";
+ctx=cvs.getContext("2d");
+ctx.scale(dpr,dpr);
+}
+function computeLayout(){
+var cx=W/2+50;
+var cy=H/2+20;
+var gSize=Math.min(W,H)*0.12;
+for(var i=0;i<expertNodes.length;i++){
+var n=expertNodes[i];
+var gcx=cx+(n.gx-1.5)*gSize;
+var gcy=cy+(n.gy-1.5)*gSize;
+if(n.x===0)n.x=gcx;
+if(n.y===0)n.y=gcy;
+var fx=0,fy=0;
+for(var j=0;j<expertNodes.length;j++){
+if(i===j)continue;
+var m=expertNodes[j];
+var dx=n.x-m.x;
+var dy=n.y-m.y;
+var dist=Math.sqrt(dx*dx+dy*dy)+0.01;
+if(n.gx===m.gx&&n.gy===m.gy){
+if(dist<gSize*0.4){
+fy+=(n.y-m.y)/gSize*0.5;
+fx+=(n.x-m.x)/gSize*0.5;
+}
+}
+}
+fx+=(gcx-n.x)*0.005;
+fy+=(gcy-n.y)*0.005;
+n.vx=fx;
+n.vy=fy;
+}
+for(var i=0;i<expertNodes.length;i++){
+var n=expertNodes[i];
+n.x+=n.vx;
+n.y+=n.vy;
+n.x=clamp(n.x,40,W-40);
+n.y=clamp(n.y,40,H-40);
+}
+}
+function drawTopology(){
+ctx.clearRect(0,0,W,H);
+ctx.fillStyle="#0a0e17";
+ctx.fillRect(0,0,W,H);
+drawGrid();
+for(var i=0;i<expertNodes.length;i++){
+var n=expertNodes[i];
+var dx=mouseX-n.x;
+var dy=mouseY-n.y;
+var hover=Math.sqrt(dx*dx+dy*dy)<15;
+var r=hover?8:5;
+ctx.beginPath();
+ctx.arc(n.x,n.y,r,0,Math.PI*2);
+ctx.fillStyle=n.active?"rgba(255,255,255,0.8)":n.color;
+ctx.fill();
+if(n.active){
+ctx.beginPath();
+ctx.arc(n.x,n.y,14+Math.sin(time*3)*3,0,Math.PI*2);
+ctx.strokeStyle=n.color;
+ctx.lineWidth=1.5;
+ctx.globalAlpha=0.3;
+ctx.stroke();
+ctx.globalAlpha=1;
+}
+if(hover){
+ctx.fillStyle="#fff";
+ctx.font="10px monospace";
+ctx.fillText(n.name+" ["+n.gx+","+n.gy+"]",n.x+12,n.y-8);
+}
+}
+for(var i=0;i<groups.length;i++){
+var g=groups[i];
+var gcx=W/2+50+(i-1.5)*Math.min(W,H)*0.18;
+var gcy=H/2+20-Math.min(W,H)*0.35;
+ctx.fillStyle=g.color;
+ctx.globalAlpha=0.15;
+ctx.beginPath();
+ctx.arc(gcx,gcy,Math.min(W,H)*0.06,0,Math.PI*2);
+ctx.fill();
+ctx.globalAlpha=0.6;
+ctx.fillStyle=g.color;
+ctx.font="11px monospace";
+ctx.textAlign="center";
+ctx.fillText(g.name.toUpperCase(),gcx,gcy-3);
+ctx.textAlign="left";
+}
+ctx.textAlign="left";
+}
+function drawGrid(){
+ctx.strokeStyle="rgba(30,42,74,0.3)";
+ctx.lineWidth=0.5;
+var step=30;
+for(var x=0;x<W;x+=step){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke()}
+for(var y=0;y<H;y+=step){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+}
+function spawnParticle(){
+var src=activeExperts[ri(0,activeExperts.length-1)];
+var tgt;
+if(rng()<0.6){
+var sameG=groups[src.domain].experts.filter(function(e){return e!==src});
+if(sameG.length)src=sameG[ri(0,sameG.length-1)];
+}
+var pool=expertNodes.filter(function(e){return e!==src});
+if(rng()<0.4)pool=pool.filter(function(e){return e.domain===src.domain});
+tgt=pool[ri(0,pool.length-1)];
+var p={
+sx:src.x,sy:src.y,
+tx:tgt.x,ty:tgt.y,
+x:src.x,y:src.y,
+prog:0,
+src:src,tgt:tgt,
+color:src.color,
+trail:[]
+};
+particles.push(p);
+addLog("Token routed: "+src.name+" \u2192 "+tgt.name,"warn");
+}
+function drawRouting(){
+ctx.clearRect(0,0,W,H);
+ctx.fillStyle="#0a0e17";
+ctx.fillRect(0,0,W,H);
+drawGrid();
+for(var i=0;i<particles.length;i++){
+var p=particles[i];
+p.prog+=0.015;
+if(p.prog>1){particles.splice(i,1);i--;continue}
+var nx=p.sx+(p.tx-p.sx)*p.prog;
+var ny=p.sy+(p.ty-p.sy)*p.prog;
+p.x=nx;
+p.y=ny;
+p.trail.unshift({x:nx,y:ny});
+if(p.trail.length>12)p.trail.pop();
+for(var t=0;t<p.trail.length;t++){
+var tp=p.trail[t];
+var alpha=(1-t/p.trail.length)*0.6;
+ctx.beginPath();
+ctx.arc(tp.x,tp.y,3*(1-t/p.trail.length),0,Math.PI*2);
+ctx.fillStyle=p.color;
+ctx.globalAlpha=alpha;
+ctx.fill();
+ctx.globalAlpha=1;
+}
+ctx.beginPath();
+ctx.arc(nx,ny,4,0,Math.PI*2);
+ctx.fillStyle="#fff";
+ctx.fill();
+}
+ctx.textAlign="center";
+ctx.fillStyle="#3366ff";
+ctx.font="bold 14px monospace";
+ctx.fillText("ROUTING PARTICLES",W/2+50,H/2+20-60);
+ctx.font="11px monospace";
+ctx.fillStyle="#4a5a8a";
+ctx.fillText("Top-2 routing with LRU cache",W/2+50,H/2+20-42);
+ctx.textAlign="left";
+}
+function drawPipeline(){
+ctx.clearRect(0,0,W,H);
+ctx.fillStyle="#0a0e17";
+ctx.fillRect(0,0,W,H);
+drawGrid();
+var stages=["Input\nTokenizer","Delta\nAttention","Expert Gate\nLRU Cache","Expert\nProcessing","Output\nSampling"];
+var stageColors=["#66aaff","#ff6b6b","#45b7d1","#4ecdc4","#f9ca24"];
+var startX=60;
+var stageW=Math.min((W-100)/stages.length,120);
+var stageH=H*0.5;
+var startY=H*0.2;
+for(var s=0;s<stages.length;s++){
+var sx=startX+s*(stageW+15);
+var sy=startY;
+ctx.strokeStyle=stageColors[s];
+ctx.globalAlpha=0.3;
+ctx.lineWidth=1;
+ctx.strokeRect(sx,sy,stageW,stageH);
+ctx.globalAlpha=0.8;
+ctx.fillStyle=stageColors[s];
+ctx.font="bold 10px monospace";
+ctx.textAlign="center";
+var lines=stages[s].split("\n");
+for(var l=0;l<lines.length;l++){
+ctx.fillText(lines[l],sx+stageW/2,sy+16+l*13);
+}
+ctx.globalAlpha=0.15;
+ctx.fillStyle=stageColors[s];
+ctx.fillRect(sx,sy,stageW,stageH);
+ctx.globalAlpha=1;
+ctx.textAlign="left";
+if(s<stages.length-1){
+var arrowX=sx+stageW+5;
+ctx.strokeStyle="#4a5a8a";
+ctx.lineWidth=2;
+ctx.beginPath();
+ctx.moveTo(arrowX+10,sy+stageH/2);
+ctx.lineTo(sx+stageW-5,sy+stageH/2);
+ctx.stroke();
+ctx.fillStyle="#4a5a8a";
+ctx.beginPath();
+ctx.moveTo(sx+stageW-5,sy+stageH/2-4);
+ctx.lineTo(sx+stageW-5,sy+stageH/2+4);
+ctx.lineTo(sx+stageW+5,sy+stageH/2);
+ctx.closePath();
+ctx.fill();
+}
+}
+for(var i=0;i<pipelineParticles.length;i++){
+var pp=pipelineParticles[i];
+pp.prog+=0.008;
+if(pp.prog>1){pipelineParticles.splice(i,1);i--;continue}
+var stageIdx=Math.floor(pp.prog*4);
+stageIdx=Math.min(stageIdx,4);
+var sx2=startX+stageIdx*(stageW+15);
+var ny=startY+stageH*(0.2+pp.phase*0.6);
+var nx=sx2+stageW*(0.1+pp.prog*0.8);
+ctx.beginPath();
+ctx.arc(nx,ny,3,0,Math.PI*2);
+ctx.fillStyle=stageColors[stageIdx];
+ctx.globalAlpha=0.8;
+ctx.fill();
+ctx.globalAlpha=1;
+}
+ctx.fillStyle="#3366ff";
+ctx.font="bold 14px monospace";
+ctx.textAlign="center";
+ctx.fillText("ARCHITECTURE PIPELINE",W/2+50,30);
+ctx.font="10px monospace";
+ctx.fillStyle="#4a5a8a";
+ctx.fillText("Delta Attention \u2192 Expert Gate \u2192 Processing \u2192 Output",W/2+50,48);
+ctx.textAlign="left";
+ctx.fillStyle="#ffaa44";
+ctx.font="9px monospace";
+ctx.fillText("* Disk Streaming: 744B active params on disk-backed LRU cache",60,H-30);
+}
+function drawArena(){
+ctx.clearRect(0,0,W,H);
+ctx.fillStyle="#0a0e17";
+ctx.fillRect(0,0,W,H);
+drawGrid();
+var models=[
+{name:"Kimi K3",color:"#ff6b6b",
+data:{reasoning:96,math:94,coding:98,knowledge:91,efficiency:97,multimodal:93}},
+{name:"Claude Opus 4.8",color:"#4ecdc4",
+data:{reasoning:95,math:93,coding:92,knowledge:95,efficiency:80,multimodal:90}},
+{name:"GPT-5.6 Sol",color:"#45b7d1",
+data:{reasoning:94,math:91,coding:95,knowledge:93,efficiency:85,multimodal:95}},
+{name:"GLM-5.2",color:"#f9ca24",
+data:{reasoning:88,math:89,coding:90,knowledge:86,efficiency:82,multimodal:80}},
+{name:"Gemini Ultra 2",color:"#a29bfe",
+data:{reasoning:92,math:90,coding:88,knowledge:92,efficiency:78,multimodal:91}}
+];
+var dims=["Reasoning","Math","Coding","Knowledge","Efficiency","Multi-Modal"];
+var nD=dims.length;
+var cx2=W/2+50;
+var cy2=H/2+20;
+var maxR=Math.min(W,H)*0.3;
+for(var d=0;d<nD;d++){
+var angle=Math.PI*2*d/nD-Math.PI/2;
+var px2=cx2+Math.cos(angle)*maxR;
+var py2=cy2+Math.sin(angle)*maxR;
+ctx.strokeStyle="rgba(30,42,74,0.5)";
+ctx.lineWidth=0.5;
+ctx.beginPath();
+ctx.moveTo(cx2,cy2);
+ctx.lineTo(px2,py2);
+ctx.stroke();
+for(var ring=2;ring<=4;ring++){
+var r=maxR*ring/4;
+ctx.beginPath();
+ctx.arc(cx2,cy2,r,0,Math.PI*2);
+ctx.strokeStyle="rgba(30,42,74,0.2)";
+ctx.stroke();
+}
+ctx.fillStyle="#4a5a8a";
+ctx.font="10px monospace";
+ctx.textAlign="center";
+ctx.fillText(dims[d],cx2+Math.cos(angle)*(maxR+15),cy2+Math.sin(angle)*(maxR+15));
+ctx.textAlign="left";
+}
+for(var m=0;m<models.length;m++){
+var mod=models[m];
+ctx.beginPath();
+for(var d=0;d<nD;d++){
+var angle=Math.PI*2*d/nD-Math.PI/2;
+var val=mod.data[dims[d]]/100;
+var r=maxR*val;
+var px3=cx2+Math.cos(angle)*r;
+var py3=cy2+Math.sin(angle)*r;
+if(d===0)ctx.moveTo(px3,py3);
+else ctx.lineTo(px3,py3);
+}
+ctx.closePath();
+ctx.strokeStyle=mod.color;
+ctx.lineWidth=2;
+ctx.stroke();
+ctx.fillStyle=mod.color;
+ctx.globalAlpha=0.1;
+ctx.fill();
+ctx.globalAlpha=1;
+}
+ctx.fillStyle="#3366ff";
+ctx.font="bold 14px monospace";
+ctx.textAlign="center";
+ctx.fillText("BENCHMARK ARENA",W/2+50,30);
+ctx.font="10px monospace";
+ctx.fillStyle="#4a5a8a";
+ctx.fillText("K3: 2.8T MoE | 8,960 Experts | Delta Attention",W/2+50,50);
+ctx.textAlign="left";
+for(var m=0;m<models.length;m++){
+var mod=models[m];
+ctx.fillStyle=mod.color;
+ctx.fillRect(60,80+m*18,8,8);
+ctx.fillStyle="#7a8ab5";
+ctx.font="10px monospace";
+ctx.fillText(mod.name,72,89+m*18);
+}
+}
+function updateHUD(){
+var hud=document.getElementById("hud");
+if(!hud)return;
+var html="";
+html+='<div><span class="label">Mode:</span><span class="val">'+modeNames.map(function(m){return m.toUpperCase()}).join(" / ")+'</span></div>';
+html+='<div><span class="label">Experts:</span><span class="val">'+activeExperts.length+' / '+expertNodes.length+'</span></div>';
+html+='<div><span class="label">Particles:</span><span class="val">'+particles.length+'</span></div>';
+html+='<div><span class="label">LRU Cache:</span><span class="val">'+lruCache.length+' entries</span></div>';
+html+='<div><span class="label">Disk Cache:</span><span class="val">'+(diskCache.length>999999?(diskCache.length/1e6).toFixed(1)+'M':diskCache.length)+'</span></div>';
+html+='<div><span class="label">Params:</span><span class="val">2.8T total / 744B active</span></div>';
+html+='<div><span class="label">Delta Att:</span><span class="val">ACTIVE</span></div>';
+html+='<div><span class="label">Latency:</span><span class="val">'+(12+Math.sin(time)*2).toFixed(1)+'ms</span></div>';
+html+='<div><span class="label">Cost/1M:</span><span class="val">$0.80</span></div>';
+hud.innerHTML=html;
+}
+function update(){
+time+=0.016;
+if(mode==="topology")computeLayout();
+if(mode==="routing"&&rng()<0.08)spawnParticle();
+if(mode==="pipeline"&&rng()<0.15){
+var pp={prog:0,phase:rng()};
+pipelineParticles.push(pp);
+}
+var nParticles=Math.min(80,particles.length);
+particles.splice(80);
+pipelineParticles.splice(100);
+}
+function render(){
+ctx.clearRect(0,0,W,H);
+if(mode==="topology")drawTopology();
+else if(mode==="routing")drawRouting();
+else if(mode==="pipeline")drawPipeline();
+else if(mode==="arena")drawArena();
+updateHUD();
+requestAnimationFrame(render);
+}
+function switchMode(m){
+mode=m;
+particles=[];
+pipelineParticles=[];
+addLog("Switched to "+m+" mode","success");
+document.querySelectorAll("#toolbar button").forEach(function(btn){
+btn.classList.toggle("active",btn.dataset.mode===m);
+});
+}
+document.getElementById("toolbar").addEventListener("click",function(e){
+if(e.target.tagName==="BUTTON")switchMode(e.target.dataset.mode);
+});
+var startX2=0,startY2=0;
+cvs.addEventListener("touchstart",function(e){
+e.preventDefault();
+var touch=e.touches[0];
+startX2=touch.clientX;
+startY2=touch.clientY;
+var rect=cvs.getBoundingClientRect();
+mouseX=touch.clientX-rect.left;
+mouseY=touch.clientY-rect.top;
+for(var i=0;i<expertNodes.length;i++){
+var n=expertNodes[i];
+if(Math.sqrt((mouseX-n.x)**2+(mouseY-n.y)**2)<15){
+dragNode=n;break;
+}
+}
+},{passive:false});
+cvs.addEventListener("touchmove",function(e){
+e.preventDefault();
+var touch=e.touches[0];
+mouseX=touch.clientX-rect2.left;
+mouseY=touch.clientY-rect2.top;
+if(dragNode){dragNode.x=mouseX;dragNode.y=mouseY}
+},{passive:false});
+var rect2;
+cvs.addEventListener("touchstart",function(){rect2=cvs.getBoundingClientRect()});
+cvs.addEventListener("touchend",function(e){
+var dx=e.changedTouches[0].clientX-startX2;
+if(Math.abs(dx)>50){
+if(dx>0){
+var ci=modeNames.indexOf(mode);
+if(ci<modeNames.length-1)switchMode(modeNames[ci+1]);
+}else{
+var ci=modeNames.indexOf(mode);
+if(ci>0)switchMode(modeNames[ci-1]);
+}
+}
+});
+window.addEventListener("resize",resize);
+window.addEventListener("mousemove",function(e){
+var rect3=cvs.getBoundingClientRect();
+mouseX=e.clientX-rect3.left;
+mouseY=e.clientY-rect3.top;
+});
+window.addEventListener("keydown",function(e){
+if(e.key==="ArrowRight"){
+var ci=modeNames.indexOf(mode);
+if(ci<modeNames.length-1)switchMode(modeNames[ci+1]);
+}
+if(e.key==="ArrowLeft"){
+var ci=modeNames.indexOf(mode);
+if(ci>0)switchMode(modeNames[ci-1]);
+}
+});
+addLog("Kimi K3 Expert Router Arena initialized","success");
+addLog("2.8T params | 8,960 experts | Delta Attention","info");
+addLog("Swipe or press \u2190\u2192 to switch modes","info");
+resize();
+initArena();
+requestAnimationFrame(render);
+}();
+</script>
+</body>
+</html>
